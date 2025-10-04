@@ -1,18 +1,16 @@
-!pip install -q feedparser requests beautifulsoup4
-
 import feedparser, requests, time, os
-from getpass import getpass
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-# ====== Settings ======
+# ====== SETTINGS ======
 RSS_URL = "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml"
-TELEGRAM_CHAT_ID = "-1002885691718"  # Sidali supergroup
+TELEGRAM_CHAT_ID = "-1002885691718"  # your supergroup ID
 CHECK_INTERVAL = 60
-LAST_ID_FILE = "/content/last_fb_post.txt"
+LAST_ID_FILE = "last_fb_post.txt"
 # =======================
 
-TELEGRAM_BOT_TOKEN = getpass("أدخل توكن بوت تليغرام (سيبقى مخفيًا أثناء الكتابة): ").strip()
+# ⚠️ REPLACE this with your bot token or set it as an environment variable in Render
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 def load_last_id():
     return open(LAST_ID_FILE).read().strip() if os.path.exists(LAST_ID_FILE) else ""
@@ -21,9 +19,8 @@ def save_last_id(pid):
     open(LAST_ID_FILE, "w").write(pid)
 
 def send_telegram_message(text, photo_url=None):
-    """Send message with/without image — disables link preview"""
     if photo_url:
-        caption = text[:1000]  # keep under Telegram caption limit
+        caption = text[:1000]
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
@@ -33,8 +30,7 @@ def send_telegram_message(text, photo_url=None):
         }
         r = requests.post(url, data=payload)
         if not r.ok:
-            print("⚠️ خطأ في إرسال الصورة:", r.text)
-        # send remainder if too long
+            print("⚠️ Error sending photo:", r.text)
         if len(text) > 1000:
             rest = text[1000:]
             requests.post(
@@ -56,7 +52,7 @@ def send_telegram_message(text, photo_url=None):
         }
         r = requests.post(url, data=payload)
         if not r.ok:
-            print("⚠️ خطأ في إرسال النص:", r.text)
+            print("⚠️ Error sending text:", r.text)
 
 print("✅ Bot started – checking Facebook RSS every", CHECK_INTERVAL, "seconds.")
 
@@ -69,7 +65,7 @@ while True:
         if feed.entries:
             latest = feed.entries[0]
             post_id = latest.get("id", latest.get("link", ""))
-            title = latest.get("title", "(بدون عنوان)")
+            title = latest.get("title", "(No title)")
             link = latest.get("link", "")
             summary_html = latest.get("summary", "")
             summary_text = BeautifulSoup(summary_html, "html.parser").get_text().strip()
@@ -78,27 +74,24 @@ while True:
             img_tag = soup.find("img")
             img_url = img_tag["src"] if img_tag and "src" in img_tag.attrs else None
 
-            message = f"📢 *منشور من صفحة المدرسة:*\n\n{title}\n\n{summary_text}\n\n🔗 {link}"
+            message = f"📢 *New post from the school page:*\n\n{title}\n\n{summary_text}\n\n🔗 {link}"
 
-            # send latest post at startup
             if not initial_sent:
                 send_telegram_message(message, photo_url=img_url)
                 save_last_id(post_id)
                 initial_sent = True
-                print(datetime.now(), "✅ تم إرسال آخر منشور الحالي:", title)
+                print(datetime.now(), "✅ Sent current latest post:", title)
 
-            # check for new posts
             elif post_id != last_id:
                 send_telegram_message(message, photo_url=img_url)
                 save_last_id(post_id)
-                print(datetime.now(), "✅ تم إرسال منشور جديد:", title)
+                print(datetime.now(), "✅ Sent new post:", title)
                 last_id = post_id
-
             else:
-                print(datetime.now(), "— لا منشورات جديدة.")
+                print(datetime.now(), "— No new posts.")
         else:
-            print(datetime.now(), "⚠️ لم يتم جلب أي منشورات من RSS.")
+            print(datetime.now(), "⚠️ No RSS posts found.")
     except Exception as e:
-        print(datetime.now(), "⚠️ خطأ:", e)
+        print(datetime.now(), "⚠️ Error:", e)
 
     time.sleep(CHECK_INTERVAL)
