@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 # ====== SETTINGS ======
 RSS_URL = "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml"
 TELEGRAM_CHAT_ID = "-1002885691718"  # your supergroup ID
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 3600
 LAST_ID_FILE = "last_fb_post.txt"
 # =======================
 
