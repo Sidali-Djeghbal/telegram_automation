@@ -1,3 +1,5 @@
-feedparser
 requests
+feedparser
 beautifulsoup4
+python-telegram-bot
+flask
