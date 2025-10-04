@@ -95,3 +95,19 @@ while True:
         print(datetime.now(), "⚠️ Error:", e)
 
     time.sleep(CHECK_INTERVAL)
+
+
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running fine!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=10000)
+
+# Start Flask in background thread
+threading.Thread(target=run_flask).start()
