@@ -1,5 +1,4 @@
-# bot.py  — run as `python bot.py` for web+worker (dev)
-# or         `python bot.py worker` to run only the worker (for background service)
+# bot.py — background Telegram notifier + web endpoint (for Render + cron-job)
 
 import os, time, json, sys, logging, threading
 from datetime import datetime
@@ -9,8 +8,7 @@ from flask import Flask
 
 # ===== SETTINGS (can be overridden by env vars) =====
 RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003028783511")
-TELEGRAM_THREAD_ID = int(os.getenv("TELEGRAM_THREAD_ID", "30"))
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-4927693812")  # your new chat ID
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))
 LAST_ID_FILE = os.getenv("LAST_ID_FILE", "last_fb_post.txt")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -50,41 +48,41 @@ def send_telegram_message(text, photo_urls=None):
     if not TELEGRAM_BOT_TOKEN:
         logging.error("No TELEGRAM_BOT_TOKEN set")
         return False
+
     safe_text = escape_markdown(text)
     caption = safe_text[:900]  # keep buffer
     rest = safe_text[900:]
-    thread_params = {
+    base_params = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "message_thread_id": TELEGRAM_THREAD_ID,
         "parse_mode": "Markdown",
     }
+
     try:
         if photo_urls:
             media = []
             for url in photo_urls[:10]:  # Telegram allows max 10
-                media.append({"type":"photo","media":url})
-            # put caption on first
+                media.append({"type": "photo", "media": url})
             media[0]["caption"] = caption
             media[0]["parse_mode"] = "Markdown"
-            payload = thread_params.copy()
+            payload = base_params.copy()
             payload["media"] = json.dumps(media)
+
             r = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup",
                              data=payload, timeout=15)
             if not r.ok:
                 logging.warning("sendMediaGroup failed: %s", r.text)
-                # fallback: send text
                 session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                             data={**thread_params, "text": safe_text, "disable_web_page_preview": True}, timeout=10)
+                             data={**base_params, "text": safe_text, "disable_web_page_preview": True}, timeout=10)
             elif rest:
                 session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                             data={**thread_params, "text": rest, "disable_web_page_preview": True}, timeout=10)
+                             data={**base_params, "text": rest, "disable_web_page_preview": True}, timeout=10)
         else:
             r = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                             data={**thread_params, "text": safe_text, "disable_web_page_preview": True}, timeout=10)
+                             data={**base_params, "text": safe_text, "disable_web_page_preview": True}, timeout=10)
             if not r.ok:
                 logging.warning("sendMessage failed: %s", r.text)
         return True
-    except Exception as e:
+    except Exception:
         logging.exception("Telegram send error")
         return False
 
@@ -93,7 +91,9 @@ def process_post(entry, last_id):
     title = entry.get("title", "(No title)")
     link = entry.get("link", "")
     summary_html = entry.get("summary", "")
+
     soup = BeautifulSoup(summary_html, "html.parser")
+
     # collect links
     link_footer = ""
     for a in soup.find_all("a"):
@@ -102,14 +102,18 @@ def process_post(entry, last_id):
         if href:
             link_footer += f"\n🔗 Link: {href}"
             a.extract()
+
     # images
     img_tags = soup.find_all("img")
     img_urls = [t.get("src") for t in img_tags if t.get("src")]
-    for t in img_tags: t.extract()
+    for t in img_tags:
+        t.extract()
+
     summary_text = soup.get_text().strip()
     message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n\n🔗 Post URL: {link}"
     if link_footer:
         message += link_footer
+
     if post_id and post_id != last_id:
         sent = send_telegram_message(message, photo_urls=img_urls if img_urls else None)
         if sent:
@@ -143,6 +147,7 @@ def worker_loop():
 
 # --- Flask ---
 app = Flask(__name__)
+
 @app.route("/")
 def home():
     return "Bot is running fine!"
