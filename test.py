@@ -1,7 +1,8 @@
 import feedparser, requests, time, os
 from datetime import datetime
 from bs4 import BeautifulSoup
-import json # Import json for sendMediaGroup payload
+import json 
+import re # Import regex for link cleanup
 
 # ====== SETTINGS ======
 RSS_URL = "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml"
@@ -20,31 +21,24 @@ def save_last_id(pid):
     # Save the latest processed post ID
     open(LAST_ID_FILE, "w").write(pid)
 
-def escape_markdown_v2(text):
+def escape_markdown(text):
     """
-    Escapes special characters in text for Telegram's MarkdownV2 parsing.
-    The most common culprit for hashtag issues is the underscore (_).
+    Escapes the underscore (_) to prevent hashtags like #new_post from
+    causing text to become incorrectly italic in Telegram Markdown.
     """
-    # Escaping is only needed for MarkdownV2. The original code used "Markdown"
-    # but the safest fix is to escape all underscores, which is required for
-    # hashtags like #test_post when using Markdown.
-    
-    # We will only escape the underscore, which is the problem character, 
-    # to avoid breaking other formatting (like links).
-    # If the original code uses 'Markdown' (not 'MarkdownV2'), escaping 
-    # the underscore should be sufficient for the reported hashtag issue.
+    # Escaping only the underscore is usually enough to fix hashtag issues
     return text.replace('_', '\\_') 
 
 def send_telegram_message(text, photo_urls=None):
     # Fix 1: Escape the text to prevent hashtags from causing unclosed italics
-    safe_text = escape_markdown_v2(text)
+    safe_text = escape_markdown(text)
     
     # Prepare the text message part (caption or standalone message)
     caption = safe_text[:1000] # Telegram caption limit is 1024, keeping a buffer
     rest_of_text = safe_text[1000:]
     
     if photo_urls:
-        # Fix 2: Handle multiple images using sendMediaGroup
+        # Handle multiple images using sendMediaGroup
         
         # 1. Prepare media payload
         media = []
@@ -53,7 +47,7 @@ def send_telegram_message(text, photo_urls=None):
             "type": "photo",
             "media": photo_urls[0],
             "caption": caption,
-            "parse_mode": "Markdown" # Use Markdown (or MarkdownV2) for caption
+            "parse_mode": "Markdown"
         })
         # Add the rest of the photos without a caption
         for url in photo_urls[1:]:
@@ -66,9 +60,10 @@ def send_telegram_message(text, photo_urls=None):
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "media": json.dumps(media) # sendMediaGroup requires the 'media' field to be a JSON string
+            "media": json.dumps(media)
         }
-        r = requests.post(url, data=payload) # Use data=payload for standard application/x-www-form-urlencoded
+        # Use data=payload for standard application/x-www-form-urlencoded
+        r = requests.post(url, data=payload) 
         if not r.ok:
             print("⚠️ Error sending media group:", r.text)
             
@@ -104,15 +99,45 @@ def process_post(entry, last_id):
     link = entry.get("link", "")
     summary_html = entry.get("summary", "")
     
-    # Fix 2: Correct logic to extract ALL image URLs
     soup = BeautifulSoup(summary_html, "html.parser")
+    
+    # 1. Fix: Find all links and correctly format them for the message
+    # We first find all <a> tags to reconstruct the link
+    a_tags = soup.find_all("a")
+    link_footer = ""
+    
+    for tag in a_tags:
+        href = tag.get("href")
+        link_text = tag.get_text().strip()
+        
+        # Append the full link to the message footer
+        if href and "..." in link_text:
+            # Reconstruct the link line
+            link_footer += f"\n🔗 Link: {href}"
+            # Remove the original truncated link text from the soup for clean summary text
+            tag.extract()
+        elif href:
+             # Keep link for any other non-truncated link for consistency
+            link_footer += f"\n🔗 Link: {href}"
+            tag.extract()
+
+    # 2. Extract ALL image URLs (as per previous fix)
     img_tags = soup.find_all("img")
-    # Extract 'src' from all found tags
     img_urls = [tag["src"] for tag in img_tags if "src" in tag.attrs]
     
+    # Remove the img tags from the soup so they don't appear in the summary text
+    for tag in img_tags:
+        tag.extract()
+
     # Prepare text
     summary_text = soup.get_text().strip()
-    message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n\n🔗 {link}"
+    
+    # Assemble the final message
+    message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n"
+    # Add the main post link first, then the links extracted from the body
+    message += f"\n🔗 Post URL: {link}"
+    if link_footer:
+        message += link_footer
     
     # Check if the post is new
     if post_id and post_id != last_id:
