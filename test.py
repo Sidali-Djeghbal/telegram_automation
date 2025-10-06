@@ -1,12 +1,14 @@
 import feedparser, requests, time, os
 from datetime import datetime
 from bs4 import BeautifulSoup
-import json 
-import re 
+import json
+import re
 
 # ====== SETTINGS ======
 RSS_URL = "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml"
-TELEGRAM_CHAT_ID = "-4927693812"
+# NEW SETTINGS for Topic/Thread:
+TELEGRAM_CHAT_ID = "-1003028783511" # The ID of the supergroup/channel
+TELEGRAM_THREAD_ID = 30           # The ID of the topic/thread within the chat
 CHECK_INTERVAL = 3600
 LAST_ID_FILE = "last_fb_post.txt"
 # =======================
@@ -29,14 +31,24 @@ def escape_markdown(text):
     return text.replace('_', '\\_') 
 
 def send_telegram_message(text, photo_urls=None):
-    # Escape the text to prevent Markdown issues
+    # Fix 1: Escape the text to prevent hashtags from causing unclosed italics
     safe_text = escape_markdown(text)
     
-    caption = safe_text[:1000] # Telegram caption limit is 1024
+    # Prepare the text message part (caption or standalone message)
+    caption = safe_text[:1000] # Telegram caption limit is 1024, keeping a buffer
     rest_of_text = safe_text[1000:]
+    
+    # Telegram API parameters for thread support
+    thread_params = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "message_thread_id": TELEGRAM_THREAD_ID, # ADDED thread ID
+        "parse_mode": "Markdown",
+    }
     
     if photo_urls:
         # Handle multiple images using sendMediaGroup
+        
+        # 1. Prepare media payload
         media = []
         # Add the first photo with the caption
         media.append({
@@ -52,37 +64,35 @@ def send_telegram_message(text, photo_urls=None):
                 "media": url
             })
 
-        # Send the media group
+        # 2. Send the media group
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "media": json.dumps(media)
-        }
+        payload = thread_params.copy()
+        payload["media"] = json.dumps(media)
+        
         r = requests.post(url, data=payload) 
         if not r.ok:
             print("⚠️ Error sending media group:", r.text)
             
-        # Send the rest of the text if it was truncated
+        # 3. Send the rest of the text if it was truncated
         if rest_of_text:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                 data={
                     "chat_id": TELEGRAM_CHAT_ID,
                     "text": rest_of_text,
+                    "message_thread_id": TELEGRAM_THREAD_ID, # ADDED thread ID
                     "parse_mode": "Markdown",
                     "disable_web_page_preview": True
                 }
             )
             
-    # Text-only message
+    # 2. Text-only message
     else:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": safe_text, # Use the escaped text
-            "parse_mode": "Markdown",
-            "disable_web_page_preview": True
-        }
+        payload = thread_params.copy()
+        payload["text"] = safe_text
+        payload["disable_web_page_preview"] = True
+
         r = requests.post(url, data=payload)
         if not r.ok:
             print("⚠️ Error sending text:", r.text)
@@ -102,9 +112,16 @@ def process_post(entry, last_id):
     
     for tag in a_tags:
         href = tag.get("href")
-        # Check if the link is a valid URL
-        if href:
-            # Reconstruct the link line and remove the original truncated link text
+        link_text = tag.get_text().strip()
+        
+        # Append the full link to the message footer
+        if href and "..." in link_text:
+            # Reconstruct the link line
+            link_footer += f"\n🔗 Link: {href}"
+            # Remove the original truncated link text from the soup for clean summary text
+            tag.extract()
+        elif href:
+             # Keep link for any other non-truncated link for consistency
             link_footer += f"\n🔗 Link: {href}"
             tag.extract()
 
@@ -139,23 +156,27 @@ print("✅ Bot started – checking Facebook RSS every", CHECK_INTERVAL, "second
 last_id = load_last_id()
 print(f"Loaded last processed ID: {last_id}")
 
-# --- Main loop logic modified to check ONLY the latest post ---
+# --- Main loop logic: check last two posts ---
 while True:
     try:
         feed = feedparser.parse(RSS_URL)
-        
         if feed.entries:
-            # Get only the latest entry (index 0)
-            latest_entry = feed.entries[0]
+            sent_post_ids = [] 
+            entries_to_check = feed.entries[:2]
             
-            is_new, new_last_id = process_post(latest_entry, last_id)
-            
-            if is_new:
-                # If a post was sent, save its ID and update last_id
-                save_last_id(new_last_id)
-                last_id = new_last_id
+            # Use reversed() to process the older post first, then the latest
+            for entry in reversed(entries_to_check):
+                is_new, new_last_id = process_post(entry, last_id)
+                if is_new:
+                    # If we sent a post, update what will be the 'new' last_id
+                    last_id = new_last_id
+                    sent_post_ids.append(new_last_id)
+                
+            # If any posts were sent, save the ID of the LATEST one sent
+            if sent_post_ids:
+                save_last_id(last_id) 
             else:
-                print(datetime.now(), "— No new posts.")
+                print(datetime.now(), "— No new posts found in the last two entries.")
 
         else:
             print(datetime.now(), "⚠️ No RSS posts found.")
