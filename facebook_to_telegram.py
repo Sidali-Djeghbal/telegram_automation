@@ -10,7 +10,7 @@ RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003028783511")
 # TELEGRAM_THREAD_ID may be absent or not an int
 try:
-    TELEGRAM_THREAD_ID = int(os.getenv("TELEGRAM_THREAD_ID", "")) if os.getenv("TELEGRAM_THREAD_ID") else None
+    TELEGRAM_THREAD_ID = int(os.getenv("TELEGRAM_THREAD_ID", "30")) if os.getenv("TELEGRAM_THREAD_ID") else None
 except Exception:
     TELEGRAM_THREAD_ID = None
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))
