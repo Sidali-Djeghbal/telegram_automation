@@ -1,15 +1,12 @@
-
 import feedparser, requests, time, os
 from datetime import datetime
 from bs4 import BeautifulSoup
-
 # ====== SETTINGS ======
 RSS_URL = "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml"
 TELEGRAM_CHAT_ID = "-4927693812"
 CHECK_INTERVAL = 3600
 LAST_ID_FILE = "last_fb_post.txt"
 # =======================
-
 # ⚠️ REPLACE this with your bot token or set it as an environment variable in Render
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
@@ -19,19 +16,38 @@ def load_last_id():
 def save_last_id(pid):
     open(LAST_ID_FILE, "w").write(pid)
 
-def send_telegram_message(text, photo_url=None):
-    if photo_url:
+def extract_all_images(summary_html):
+    """Extract all image URLs from the post HTML"""
+    soup = BeautifulSoup(summary_html, "html.parser")
+    img_tags = soup.find_all("img")
+    return [img["src"] for img in img_tags if img.get("src")]
+
+def send_telegram_message(text, photo_urls=None):
+    if photo_urls and len(photo_urls) > 0:
+        # Send first photo with caption
         caption = text[:1000]
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
-            "photo": photo_url,
+            "photo": photo_urls[0],
             "caption": caption,
             "parse_mode": "Markdown"
         }
         r = requests.post(url, data=payload)
         if not r.ok:
             print("⚠️ Error sending photo:", r.text)
+        
+        # Send remaining photos without caption
+        for photo_url in photo_urls[1:]:
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "photo": photo_url
+            }
+            r = requests.post(url, data=payload)
+            if not r.ok:
+                print("⚠️ Error sending additional photo:", r.text)
+        
+        # Send remaining text if caption was truncated
         if len(text) > 1000:
             rest = text[1000:]
             requests.post(
@@ -56,7 +72,6 @@ def send_telegram_message(text, photo_url=None):
             print("⚠️ Error sending text:", r.text)
 
 print("✅ Bot started – checking Facebook RSS every", CHECK_INTERVAL, "seconds.")
-
 last_id = load_last_id()
 initial_sent = False
 
@@ -64,39 +79,56 @@ while True:
     try:
         feed = feedparser.parse(RSS_URL)
         if feed.entries:
-            latest = feed.entries[0]
-            post_id = latest.get("id", latest.get("link", ""))
-            title = latest.get("title", "(No title)")
-            link = latest.get("link", "")
-            summary_html = latest.get("summary", "")
-            summary_text = BeautifulSoup(summary_html, "html.parser").get_text().strip()
-
-            soup = BeautifulSoup(summary_html, "html.parser")
-            img_tag = soup.find("img")
-            img_url = img_tag["src"] if img_tag and "src" in img_tag.attrs else None
-
-            message = f"📢 *New post from the school page:*\n\n{title}\n\n{summary_text}\n\n🔗 {link}"
-
+            # Get last two posts
+            posts_to_process = feed.entries[:2]
+            
             if not initial_sent:
-                send_telegram_message(message, photo_url=img_url)
-                save_last_id(post_id)
+                # Send last two posts on startup
+                for post in reversed(posts_to_process):
+                    post_id = post.get("id", post.get("link", ""))
+                    title = post.get("title", "(No title)")
+                    link = post.get("link", "")
+                    summary_html = post.get("summary", "")
+                    summary_text = BeautifulSoup(summary_html, "html.parser").get_text().strip()
+                    
+                    # Extract all images
+                    img_urls = extract_all_images(summary_html)
+                    
+                    message = f"📢 *New post from the school page:*\n\n{title}\n\n{summary_text}\n\n🔗 {link}"
+                    send_telegram_message(message, photo_urls=img_urls)
+                    print(datetime.now(), "✅ Sent post:", title)
+                
+                # Save the latest post ID
+                save_last_id(posts_to_process[0].get("id", posts_to_process[0].get("link", "")))
                 initial_sent = True
-                print(datetime.now(), "✅ Sent current latest post:", title)
-
-            elif post_id != last_id:
-                send_telegram_message(message, photo_url=img_url)
-                save_last_id(post_id)
-                print(datetime.now(), "✅ Sent new post:", title)
-                last_id = post_id
+                last_id = posts_to_process[0].get("id", posts_to_process[0].get("link", ""))
             else:
-                print(datetime.now(), "— No new posts.")
+                # Check for new posts
+                latest = posts_to_process[0]
+                post_id = latest.get("id", latest.get("link", ""))
+                
+                if post_id != last_id:
+                    title = latest.get("title", "(No title)")
+                    link = latest.get("link", "")
+                    summary_html = latest.get("summary", "")
+                    summary_text = BeautifulSoup(summary_html, "html.parser").get_text().strip()
+                    
+                    # Extract all images
+                    img_urls = extract_all_images(summary_html)
+                    
+                    message = f"📢 *New post from the school page:*\n\n{title}\n\n{summary_text}\n\n🔗 {link}"
+                    send_telegram_message(message, photo_urls=img_urls)
+                    save_last_id(post_id)
+                    print(datetime.now(), "✅ Sent new post:", title)
+                    last_id = post_id
+                else:
+                    print(datetime.now(), "— No new posts.")
         else:
             print(datetime.now(), "⚠️ No RSS posts found.")
     except Exception as e:
         print(datetime.now(), "⚠️ Error:", e)
-
+    
     time.sleep(CHECK_INTERVAL)
-
 
 from flask import Flask
 import threading
