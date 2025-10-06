@@ -1,25 +1,26 @@
-# bot.py
+# bot.py — Telegram RSS to forum topic (chat -1003028783511, thread 30)
+
 import os, time, json, sys, logging, threading
 from datetime import datetime
 import feedparser, requests
 from bs4 import BeautifulSoup
 from flask import Flask
 
-# ===== SETTINGS (env overrides) =====
+# ===== SETTINGS =====
 RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003028783511")
-# TELEGRAM_THREAD_ID may be absent or not an int
-try:
-    TELEGRAM_THREAD_ID = int(os.getenv("TELEGRAM_THREAD_ID", "30")) if os.getenv("TELEGRAM_THREAD_ID") else None
-except Exception:
-    TELEGRAM_THREAD_ID = None
+
+# Fixed chat & topic for Telegram
+TELEGRAM_CHAT_ID = "-1003028783511"
+TELEGRAM_THREAD_ID = 30
+
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))
 LAST_ID_FILE = os.getenv("LAST_ID_FILE", "last_fb_post.txt")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.getenv("PORT", "10000"))
-DATABASE_URL = os.getenv("DATABASE_URL")  # optional: Render Postgres (recommended if you want persistence)
+DATABASE_URL = os.getenv("DATABASE_URL")  # optional: Render Postgres
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
 session = requests.Session()
 session.headers.update({"User-Agent": "rss-telegram-bot/1.0"})
 
@@ -42,6 +43,7 @@ def init_db():
         logging.info("Connected to Postgres for persistent key-value storage.")
     except Exception:
         logging.exception("Could not init Postgres (will fallback to file storage).")
+
 init_db()
 
 def db_get(k):
@@ -67,7 +69,6 @@ def atomic_write(path, data):
     os.replace(tmp, path)
 
 def load_last_id():
-    # Prefer DB if available
     try:
         val = db_get("last_id")
         if val:
@@ -107,16 +108,15 @@ def send_telegram_message(text, photo_urls=None):
     rest = safe_text[900:]
     thread_params = {
         "chat_id": TELEGRAM_CHAT_ID,
+        "message_thread_id": TELEGRAM_THREAD_ID,  # always send to topic 30
         "parse_mode": "Markdown",
     }
-    if TELEGRAM_THREAD_ID is not None:
-        thread_params["message_thread_id"] = TELEGRAM_THREAD_ID
 
     try:
         if photo_urls:
             media = []
-            for url in photo_urls[:10]:  # telegram limit
-                media.append({"type":"photo","media":url})
+            for url in photo_urls[:10]:
+                media.append({"type": "photo", "media": url})
             media[0]["caption"] = caption
             media[0]["parse_mode"] = "Markdown"
             payload = thread_params.copy()
@@ -147,20 +147,24 @@ def process_post(entry, last_id):
     link = entry.get("link", "")
     summary_html = entry.get("summary", "")
     soup = BeautifulSoup(summary_html, "html.parser")
+
     link_footer = ""
     for a in soup.find_all("a"):
         href = a.get("href")
         if href:
             link_footer += f"\n🔗 Link: {href}"
             a.extract()
+
     img_tags = soup.find_all("img")
     img_urls = [t.get("src") for t in img_tags if t.get("src")]
     for t in img_tags:
         t.extract()
+
     summary_text = soup.get_text().strip()
     message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n\n🔗 Post URL: {link}"
     if link_footer:
         message += link_footer
+
     if post_id and post_id != last_id:
         sent = send_telegram_message(message, photo_urls=img_urls if img_urls else None)
         if sent:
@@ -175,7 +179,6 @@ def worker_loop():
     backoff = 1
     while True:
         try:
-            # use requests with timeout, then parse
             resp = session.get(RSS_URL, timeout=20)
             resp.raise_for_status()
             feed = feedparser.parse(resp.content)
@@ -195,20 +198,18 @@ def worker_loop():
             backoff = min(300, backoff * 2)
         time.sleep(CHECK_INTERVAL if backoff == 1 else backoff)
 
-# ---------- Flask app ----------
+# ---------- Flask ----------
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "Bot is running fine!"
 
-# Start background thread automatically when module imported and we are NOT running 'python bot.py worker'
 _bg_thread_started = False
 def maybe_start_background():
     global _bg_thread_started
     if _bg_thread_started:
         return
-    # If user passed 'worker' as CLI arg, we won't start thread here (worker mode will call worker_loop directly)
     if any(arg == "worker" for arg in sys.argv[1:]):
         return
     _bg_thread_started = True
@@ -217,9 +218,7 @@ def maybe_start_background():
 maybe_start_background()
 
 if __name__ == "__main__":
-    # CLI mode: `python bot.py worker` runs only the worker (useful for local testing)
     if len(sys.argv) > 1 and sys.argv[1] == "worker":
         worker_loop()
     else:
-        # dev fallback: run the Flask dev server
         app.run(host="0.0.0.0", port=PORT)
