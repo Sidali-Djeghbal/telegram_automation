@@ -1,5 +1,6 @@
-requests
-feedparser
-beautifulsoup4
-python-telegram-bot
-flask
+feedparser==6.0.10
+requests==2.31.0
+beautifulsoup4==4.12.2
+flask==3.0.0
+lxml==4.9.3
+gunicorn==21.2.0
