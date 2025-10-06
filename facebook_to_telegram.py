@@ -1,253 +1,225 @@
-import feedparser
-import requests
-import os
-import logging
+# bot.py
+import os, time, json, sys, logging, threading
 from datetime import datetime
+import feedparser, requests
 from bs4 import BeautifulSoup
-from flask import Flask, jsonify
-from urllib.parse import urlparse
+from flask import Flask
 
-# ====== LOGGING SETUP ======
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# ===== SETTINGS (env overrides) =====
+RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003028783511")
+# TELEGRAM_THREAD_ID may be absent or not an int
+try:
+    TELEGRAM_THREAD_ID = int(os.getenv("TELEGRAM_THREAD_ID", "")) if os.getenv("TELEGRAM_THREAD_ID") else None
+except Exception:
+    TELEGRAM_THREAD_ID = None
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))
+LAST_ID_FILE = os.getenv("LAST_ID_FILE", "last_fb_post.txt")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+PORT = int(os.getenv("PORT", "10000"))
+DATABASE_URL = os.getenv("DATABASE_URL")  # optional: Render Postgres (recommended if you want persistence)
 
-# ====== SETTINGS ======
-RSS_URL = "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml"
-TELEGRAM_CHAT_ID = "-1003028783511"
-TELEGRAM_THREAD_ID = 30
-LAST_ID_FILE = "last_fb_post.txt"
-MAX_POSTS_PER_CHECK = 5  # Process up to 5 new posts at once
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+session = requests.Session()
+session.headers.update({"User-Agent": "rss-telegram-bot/1.0"})
 
-# ✅ Use environment variable for token (more secure)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8031430256:AAEWkwTFw9iCf3jcYOptj351dZX7MjJ06ck")
+# ---------- optional small DB fallback (Postgres) ----------
+db_conn = None
+def init_db():
+    global db_conn
+    if not DATABASE_URL:
+        return
+    try:
+        import psycopg2
+        db_conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        with db_conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_kv (
+                k TEXT PRIMARY KEY,
+                v TEXT
+            )""")
+            db_conn.commit()
+        logging.info("Connected to Postgres for persistent key-value storage.")
+    except Exception:
+        logging.exception("Could not init Postgres (will fallback to file storage).")
+init_db()
 
-# ====== CORE FUNCTIONS ======
+def db_get(k):
+    if not db_conn:
+        return None
+    with db_conn.cursor() as cur:
+        cur.execute("SELECT v FROM bot_kv WHERE k=%s", (k,))
+        r = cur.fetchone()
+        return r[0] if r else None
+
+def db_set(k, v):
+    if not db_conn:
+        return
+    with db_conn.cursor() as cur:
+        cur.execute("INSERT INTO bot_kv(k,v) VALUES(%s,%s) ON CONFLICT (k) DO UPDATE SET v=EXCLUDED.v", (k, v))
+        db_conn.commit()
+
+# ---------- file helpers ----------
+def atomic_write(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
 def load_last_id():
-    """Load the last processed post ID from file."""
+    # Prefer DB if available
+    try:
+        val = db_get("last_id")
+        if val:
+            return val
+    except Exception:
+        logging.exception("db_get failed")
     try:
         if os.path.exists(LAST_ID_FILE):
-            with open(LAST_ID_FILE, 'r') as f:
+            with open(LAST_ID_FILE, "r", encoding="utf-8") as f:
                 return f.read().strip()
-    except Exception as e:
-        logger.error(f"Error loading last ID: {e}")
+    except Exception:
+        logging.exception("Failed to load last id from file")
     return ""
 
-def save_last_id(post_id):
-    """Save the last processed post ID to file."""
+def save_last_id(pid):
     try:
-        with open(LAST_ID_FILE, 'w') as f:
-            f.write(post_id)
-        logger.info(f"Saved last post ID: {post_id}")
-    except Exception as e:
-        logger.error(f"Error saving last ID: {e}")
-
-def is_valid_image_url(url):
-    """Validate if the URL is a proper image URL."""
-    if not url:
-        return False
-    try:
-        parsed = urlparse(url)
-        if not parsed.scheme in ['http', 'https']:
-            return False
-        # Check if URL ends with common image extensions
-        image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp')
-        return any(parsed.path.lower().endswith(ext) for ext in image_extensions) or 'fbcdn' in url
+        if db_conn:
+            db_set("last_id", pid)
+            return
     except Exception:
-        return False
+        logging.exception("db_set failed")
+    try:
+        atomic_write(LAST_ID_FILE, pid)
+    except Exception:
+        logging.exception("Failed to save last id to file")
 
+# ---------- telegram helper ----------
 def escape_markdown(text):
-    """Escape special characters for Telegram Markdown."""
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, '\\' + char)
-    return text
+    return text.replace('_', '\\_')
 
-def send_telegram_message(text, photo_url=None):
-    """Send message to Telegram group/topic."""
+def send_telegram_message(text, photo_urls=None):
     if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not found.")
+        logging.error("No TELEGRAM_BOT_TOKEN set")
         return False
-    
-    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-    
+    safe_text = escape_markdown(text)
+    caption = safe_text[:900]
+    rest = safe_text[900:]
+    thread_params = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "parse_mode": "Markdown",
+    }
+    if TELEGRAM_THREAD_ID is not None:
+        thread_params["message_thread_id"] = TELEGRAM_THREAD_ID
+
     try:
-        if photo_url and is_valid_image_url(photo_url):
-            caption = text[:1000]  # Telegram caption limit
-            
-            response = requests.post(
-                f"{base_url}/sendPhoto",
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "message_thread_id": TELEGRAM_THREAD_ID,
-                    "photo": photo_url,
-                    "caption": caption,
-                    "parse_mode": "Markdown",
-                },
-                timeout=30
-            )
-            
-            if not response.ok:
-                logger.error(f"Error sending photo: {response.text}")
-                # Fallback to text-only message
-                return send_telegram_message(text, photo_url=None)
-            
-            # Send remaining text if caption was truncated
-            if len(text) > 1000:
-                rest_text = text[1000:]
-                requests.post(
-                    f"{base_url}/sendMessage",
-                    data={
-                        "chat_id": TELEGRAM_CHAT_ID,
-                        "message_thread_id": TELEGRAM_THREAD_ID,
-                        "text": rest_text,
-                        "parse_mode": "Markdown",
-                        "disable_web_page_preview": True,
-                    },
-                    timeout=30
-                )
+        if photo_urls:
+            media = []
+            for url in photo_urls[:10]:  # telegram limit
+                media.append({"type":"photo","media":url})
+            media[0]["caption"] = caption
+            media[0]["parse_mode"] = "Markdown"
+            payload = thread_params.copy()
+            payload["media"] = json.dumps(media)
+            r = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup",
+                             data=payload, timeout=15)
+            if not r.ok:
+                logging.warning("sendMediaGroup failed: %s", r.text)
+                session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                             data={**thread_params, "text": safe_text, "disable_web_page_preview": True}, timeout=10)
+            elif rest:
+                session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                             data={**thread_params, "text": rest, "disable_web_page_preview": True}, timeout=10)
         else:
-            response = requests.post(
-                f"{base_url}/sendMessage",
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "message_thread_id": TELEGRAM_THREAD_ID,
-                    "text": text,
-                    "parse_mode": "Markdown",
-                    "disable_web_page_preview": True,
-                },
-                timeout=30
-            )
-            
-            if not response.ok:
-                logger.error(f"Error sending text: {response.text}")
-                return False
-        
+            r = session.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                             data={**thread_params, "text": safe_text, "disable_web_page_preview": True}, timeout=10)
+            if not r.ok:
+                logging.warning("sendMessage failed: %s", r.text)
         return True
-    
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error sending message: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error sending message: {e}")
+    except Exception:
+        logging.exception("Telegram send error")
         return False
 
-def extract_post_data(entry):
-    """Extract relevant data from RSS entry."""
-    try:
-        post_id = entry.get("id", entry.get("link", ""))
-        title = entry.get("title", "(No title)")
-        link = entry.get("link", "")
-        
-        summary_html = entry.get("summary", "")
-        summary_text = BeautifulSoup(summary_html, "html.parser").get_text().strip()
-        
-        # Extract image URL
-        soup = BeautifulSoup(summary_html, "html.parser")
-        img_tag = soup.find("img")
-        img_url = img_tag.get("src") if img_tag else None
-        
-        return {
-            "id": post_id,
-            "title": title,
-            "link": link,
-            "summary": summary_text,
-            "image_url": img_url
-        }
-    except Exception as e:
-        logger.error(f"Error extracting post data: {e}")
-        return None
+# ---------- processing ----------
+def process_post(entry, last_id):
+    post_id = entry.get("id", entry.get("link", ""))
+    title = entry.get("title", "(No title)")
+    link = entry.get("link", "")
+    summary_html = entry.get("summary", "")
+    soup = BeautifulSoup(summary_html, "html.parser")
+    link_footer = ""
+    for a in soup.find_all("a"):
+        href = a.get("href")
+        if href:
+            link_footer += f"\n🔗 Link: {href}"
+            a.extract()
+    img_tags = soup.find_all("img")
+    img_urls = [t.get("src") for t in img_tags if t.get("src")]
+    for t in img_tags:
+        t.extract()
+    summary_text = soup.get_text().strip()
+    message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n\n🔗 Post URL: {link}"
+    if link_footer:
+        message += link_footer
+    if post_id and post_id != last_id:
+        sent = send_telegram_message(message, photo_urls=img_urls if img_urls else None)
+        if sent:
+            logging.info("✅ Sent new post: %s (%d images)", title, len(img_urls))
+            return True, post_id
+    return False, last_id
 
-def check_facebook_feed():
-    """Check Facebook RSS feed for new posts."""
-    logger.info("⏳ Checking Facebook RSS feed...")
-    
-    try:
-        feed = feedparser.parse(RSS_URL)
-        
-        if not feed.entries:
-            logger.warning("⚠️ No RSS posts found.")
-            return {"status": "warning", "message": "No RSS posts found."}
-        
-        last_id = load_last_id()
-        new_posts = []
-        
-        # Collect new posts (up to MAX_POSTS_PER_CHECK)
-        for entry in feed.entries[:MAX_POSTS_PER_CHECK]:
-            post_data = extract_post_data(entry)
-            if not post_data:
-                continue
-            
-            if post_data["id"] == last_id:
-                break  # Stop when we reach the last processed post
-            
-            new_posts.append(post_data)
-        
-        if not new_posts:
-            logger.info("— No new posts.")
-            return {"status": "success", "message": "No new posts."}
-        
-        # Send posts in reverse order (oldest first)
-        sent_count = 0
-        for post in reversed(new_posts):
-            message = (
-                f"📢 *New post from the school page:*\n\n"
-                f"{post['title']}\n\n"
-                f"{post['summary']}\n\n"
-                f"🔗 {post['link']}"
-            )
-            
-            if send_telegram_message(message, photo_url=post['image_url']):
-                sent_count += 1
-                logger.info(f"✅ Sent post: {post['title']}")
+def worker_loop():
+    logging.info("Worker started; checking every %s seconds", CHECK_INTERVAL)
+    last_id = load_last_id()
+    logging.info("Loaded last id: %s", last_id)
+    backoff = 1
+    while True:
+        try:
+            # use requests with timeout, then parse
+            resp = session.get(RSS_URL, timeout=20)
+            resp.raise_for_status()
+            feed = feedparser.parse(resp.content)
+            if feed.entries:
+                latest = feed.entries[0]
+                is_new, new_id = process_post(latest, last_id)
+                if is_new:
+                    last_id = new_id
+                    save_last_id(last_id)
+                else:
+                    logging.debug("No new posts")
             else:
-                logger.error(f"❌ Failed to send post: {post['title']}")
-        
-        # Save the ID of the most recent post
-        if new_posts:
-            save_last_id(new_posts[0]["id"])
-        
-        result_msg = f"✅ Sent {sent_count} new post(s)."
-        logger.info(result_msg)
-        return {"status": "success", "message": result_msg, "posts_sent": sent_count}
-    
-    except feedparser.FeedParserException as e:
-        logger.error(f"⚠️ Feed parsing error: {e}")
-        return {"status": "error", "message": f"Feed parsing error: {e}"}
-    except Exception as e:
-        logger.error(f"⚠️ Unexpected error: {e}")
-        return {"status": "error", "message": f"Unexpected error: {e}"}
+                logging.warning("No feed entries")
+            backoff = 1
+        except Exception:
+            logging.exception("Worker exception")
+            backoff = min(300, backoff * 2)
+        time.sleep(CHECK_INTERVAL if backoff == 1 else backoff)
 
-# ====== FLASK APP ======
+# ---------- Flask app ----------
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
-    """Home endpoint - triggers feed check."""
-    result = check_facebook_feed()
-    return jsonify(result)
+    return "Bot is running fine!"
 
-@app.route('/health')
-def health():
-    """Health check endpoint."""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "last_post_id": load_last_id()
-    })
-
-@app.route('/test')
-def test():
-    """Test endpoint - sends a test message."""
-    test_message = "🧪 Test message from Facebook-to-Telegram bot"
-    success = send_telegram_message(test_message)
-    return jsonify({
-        "status": "success" if success else "error",
-        "message": "Test message sent" if success else "Failed to send test message"
-    })
+# Start background thread automatically when module imported and we are NOT running 'python bot.py worker'
+_bg_thread_started = False
+def maybe_start_background():
+    global _bg_thread_started
+    if _bg_thread_started:
+        return
+    # If user passed 'worker' as CLI arg, we won't start thread here (worker mode will call worker_loop directly)
+    if any(arg == "worker" for arg in sys.argv[1:]):
+        return
+    _bg_thread_started = True
+    t = threading.Thread(target=worker_loop, daemon=True)
+    t.start()
+maybe_start_background()
 
 if __name__ == "__main__":
-    logger.info("🚀 Starting Facebook-to-Telegram bot...")
-    app.run(host="0.0.0.0", port=10000, debug=False)
+    # CLI mode: `python bot.py worker` runs only the worker (useful for local testing)
+    if len(sys.argv) > 1 and sys.argv[1] == "worker":
+        worker_loop()
+    else:
+        # dev fallback: run the Flask dev server
+        app.run(host="0.0.0.0", port=PORT)
