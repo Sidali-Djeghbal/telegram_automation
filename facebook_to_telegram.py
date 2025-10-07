@@ -13,7 +13,7 @@ RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
 TELEGRAM_CHAT_ID = "-1003028783511"
 TELEGRAM_THREAD_ID = 30
 
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))
 LAST_ID_FILE = os.getenv("LAST_ID_FILE", "last_fb_post.txt")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 PORT = int(os.getenv("PORT", "10000"))
