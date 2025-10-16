@@ -5,9 +5,8 @@ from bs4 import BeautifulSoup
 from flask import Flask
 
 # ===== SETTINGS (can be overridden by env vars) =====
-#RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
-RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/xL23H0pN9DliYWjb.xml")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-4927693812")  
+RSS_URL = os.getenv("RSS_URL", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))
 LAST_ID_FILE = os.getenv("LAST_ID_FILE", "last_fb_post.txt")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
