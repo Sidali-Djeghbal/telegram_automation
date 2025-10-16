@@ -1,5 +1,3 @@
-# bot.py — background Telegram notifier + web endpoint (for Render + cron-job)
-
 import os, time, json, sys, logging, threading
 from datetime import datetime
 import feedparser, requests
@@ -9,7 +7,7 @@ from flask import Flask
 # ===== SETTINGS (can be overridden by env vars) =====
 #RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/ns3Rql1vEE1hffmX.xml")
 RSS_URL = os.getenv("RSS_URL", "https://rss.app/feeds/xL23H0pN9DliYWjb.xml")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-4927693812")  # your new chat ID
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-4927693812")  
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))
 LAST_ID_FILE = os.getenv("LAST_ID_FILE", "last_fb_post.txt")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -51,7 +49,7 @@ def send_telegram_message(text, photo_urls=None):
         return False
 
     safe_text = escape_markdown(text)
-    caption = safe_text[:900]  # keep buffer
+    caption = safe_text[:900]  # khelli buffer
     rest = safe_text[900:]
     base_params = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -61,7 +59,7 @@ def send_telegram_message(text, photo_urls=None):
     try:
         if photo_urls:
             media = []
-            for url in photo_urls[:10]:  # Telegram allows max 10
+            for url in photo_urls[:10]:  # telegram allows max 10
                 media.append({"type": "photo", "media": url})
             media[0]["caption"] = caption
             media[0]["parse_mode"] = "Markdown"
@@ -95,7 +93,7 @@ def process_post(entry, last_id):
 
     soup = BeautifulSoup(summary_html, "html.parser")
 
-    # collect links
+    # njibo les liens
     link_footer = ""
     for a in soup.find_all("a"):
         href = a.get("href")
@@ -104,14 +102,14 @@ def process_post(entry, last_id):
             link_footer += f"\n🔗 Link: {href}"
             a.extract()
 
-    # images
+    # w les photos tani
     img_tags = soup.find_all("img")
     img_urls = [t.get("src") for t in img_tags if t.get("src")]
     for t in img_tags:
         t.extract()
 
     summary_text = soup.get_text().strip()
-    message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n\n🔗 Post URL: {link}"
+    message = f"📢 New post from the school page:\n\n{title}\n\n{summary_text}\n\n🔗 Post URL: {link}" # ada message li ytla3
     if link_footer:
         message += link_footer
 
@@ -146,7 +144,7 @@ def worker_loop():
             backoff = min(300, backoff * 2)
         time.sleep(CHECK_INTERVAL if backoff == 1 else backoff)
 
-# --- Flask ---
+# --- chui flask (fake server) bah yb9a always ON---
 app = Flask(__name__)
 
 @app.route("/")
